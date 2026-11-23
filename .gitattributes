@@ -1,0 +1,3 @@
+# parts are byte slices: never convert or diff them
+* -text
+*.bin binary

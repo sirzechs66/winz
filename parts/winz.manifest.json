@@ -1,0 +1,73 @@
+{
+    "format":  "split-archive/1",
+    "tool":  "split-ps/1.0",
+    "createdUtc":  "2026-11-23T16:02:46Z",
+    "sourceName":  "Wingspan-3.0.6 Setup.exe",
+    "outputName":  "winz.exe",
+    "sourceBytes":  150822912,
+    "sourceSha256":  "3556fff271ddab3506e4bce05f8d6de44e8616929bd68644eb1cbae904c96d51",
+    "partSizeBytes":  15728640,
+    "partCount":  10,
+    "parts":  [
+                  {
+                      "index":  1,
+                      "file":  "winz_001.bin",
+                      "bytes":  15728640,
+                      "sha256":  "55780236e6f0e101b452e6550e2a5fa3c5e289dac92e6b03d833a0521e7835a8"
+                  },
+                  {
+                      "index":  2,
+                      "file":  "winz_002.bin",
+                      "bytes":  15728640,
+                      "sha256":  "9db8e8b8eaddaf5f2dcda3522d604a53f38bff21e437c1fc64452e5f8bd52364"
+                  },
+                  {
+                      "index":  3,
+                      "file":  "winz_003.bin",
+                      "bytes":  15728640,
+                      "sha256":  "97739c28fd38093886b48693f93bf74b374de819e8789b5abf1439efff7ced7d"
+                  },
+                  {
+                      "index":  4,
+                      "file":  "winz_004.bin",
+                      "bytes":  15728640,
+                      "sha256":  "8dba81c356c90ef40b2f2388f845eda199291289ede6fd11217052dff923ff4a"
+                  },
+                  {
+                      "index":  5,
+                      "file":  "winz_005.bin",
+                      "bytes":  15728640,
+                      "sha256":  "84d0dabdbaef1161cfba4b2347028f1af265961817fb22211acffb67847940a1"
+                  },
+                  {
+                      "index":  6,
+                      "file":  "winz_006.bin",
+                      "bytes":  15728640,
+                      "sha256":  "13cd3375829780cbda194890389e2970e7927853f275c33ad422480e3433f1cd"
+                  },
+                  {
+                      "index":  7,
+                      "file":  "winz_007.bin",
+                      "bytes":  15728640,
+                      "sha256":  "4a9bc57efc7efa1aed5876f95799d2ff43d935937cec0ff0a9337b13f029b02e"
+                  },
+                  {
+                      "index":  8,
+                      "file":  "winz_008.bin",
+                      "bytes":  15728640,
+                      "sha256":  "327cf999bf7063159a9cba2a039ecf4669fc52b15c60dc598a0baa6544a8db4a"
+                  },
+                  {
+                      "index":  9,
+                      "file":  "winz_009.bin",
+                      "bytes":  15728640,
+                      "sha256":  "a4b9db1c1c2ef4b615e51b83b2e2b99339d3ee8d5f0d93f667da6250c95bdf7c"
+                  },
+                  {
+                      "index":  10,
+                      "file":  "winz_010.bin",
+                      "bytes":  9265152,
+                      "sha256":  "7fa1f028073b498465f0c2496a1be34155baf8cc536d9aa1f92a86974d5effd9"
+                  }
+              ]
+}

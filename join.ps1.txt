@@ -1,0 +1,342 @@
+<#
+.SYNOPSIS
+    Rebuilds a file that split.ps1 broke into parts, verifying every byte.
+
+.DESCRIPTION
+    Reads <name>.manifest.json, checks that every part is present, has the
+    expected size and matches its recorded SHA-256, concatenates the parts in
+    the recorded order, re-checks the SHA-256 of the result and only then
+    promotes the file to its final name.
+
+    Design notes:
+      * A part that was truncated or altered in transit is reported by name, so
+        only that one file has to be sent again.
+      * The rebuilt file is written to a temporary name first; a failure can
+        never leave a half-written file under the real name.
+      * Windows PowerShell 5.1 and PowerShell 7+, no external tools, long-path
+        (\\?\) aware.
+
+.PARAMETER PartsDir
+    Folder holding the manifest and the parts. A path to the manifest itself is
+    also accepted.
+
+.PARAMETER Manifest
+    Explicit manifest path (overrides PartsDir detection).
+
+.PARAMETER OutputPath
+    Where to write the rebuilt file. Default: the parts folder.
+
+.PARAMETER VerifyOnly
+    Check all parts and stop without rebuilding.
+
+.PARAMETER Force
+    Overwrite OutputPath if it already exists.
+
+.EXAMPLE
+    .\join.cmd .\parts
+
+.EXAMPLE
+    .\join.cmd .\parts -OutputPath "$env:USERPROFILE\Downloads\Wingspan-3.0.6 Setup.exe"
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Position = 0)]
+    [string]$PartsDir = '.',
+
+    [string]$Manifest,
+
+    [string]$OutputPath,
+
+    [switch]$VerifyOnly,
+
+    [switch]$Force
+)
+
+$ErrorActionPreference = 'Stop'
+$BufferSize = 1MB
+
+trap {
+    Write-Progress -Activity 'Verifying parts' -Completed -ErrorAction SilentlyContinue
+    Write-Progress -Activity 'Joining' -Completed -ErrorAction SilentlyContinue
+    Write-Host ''
+    Write-Host ('ERROR: ' + $_.Exception.Message) -ForegroundColor Red
+    if ($VerbosePreference -ne 'SilentlyContinue' -and $_.ScriptStackTrace) {
+        Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
+    }
+    exit 1
+}
+
+function ConvertTo-LongPath {
+    param([string]$FullPath)
+    if ($FullPath.StartsWith('\\?\')) { return $FullPath }
+    if ($FullPath.StartsWith('\\')) { return '\\?\UNC\' + $FullPath.Substring(2) }
+    if ($FullPath.Length -ge 240) { return '\\?\' + $FullPath }
+    return $FullPath
+}
+
+function Get-FileSha256 {
+    param(
+        [string]$FullPath,
+        [string]$Activity
+    )
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $total = [int64]0
+    $fs = [System.IO.File]::Open((ConvertTo-LongPath $FullPath),
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read)
+    try {
+        $total = $fs.Length
+        $buffer = New-Object byte[] $BufferSize
+        $done = [int64]0
+        if ($Activity -and $total -gt 8MB) {
+            Write-Progress -Activity $Activity -Status 'Hashing' -PercentComplete 0
+        }
+        while ($true) {
+            $read = $fs.Read($buffer, 0, $buffer.Length)
+            if ($read -le 0) { break }
+            $null = $sha.TransformBlock($buffer, 0, $read, $buffer, 0)
+            $done += $read
+            if ($Activity -and $total -gt 8MB) {
+                $pct = [int][Math]::Min(100, [Math]::Floor(($done / [double]$total) * 100))
+                Write-Progress -Activity $Activity -Status 'Hashing' -PercentComplete $pct
+            }
+        }
+        $null = $sha.TransformFinalBlock((New-Object byte[] 0), 0, 0)
+        $bytes = $sha.Hash
+    }
+    finally {
+        $fs.Dispose()
+        $sha.Dispose()
+        if ($Activity -and $total -gt 8MB) { Write-Progress -Activity $Activity -Completed }
+    }
+    return ([System.BitConverter]::ToString($bytes) -replace '-', '').ToLowerInvariant()
+}
+
+function Format-Bytes {
+    param([int64]$Bytes)
+    if ($Bytes -ge 1GB) { return ('{0:N2} GiB' -f ($Bytes / 1GB)) }
+    if ($Bytes -ge 1MB) { return ('{0:N2} MiB' -f ($Bytes / 1MB)) }
+    if ($Bytes -ge 1KB) { return ('{0:N1} KiB' -f ($Bytes / 1KB)) }
+    return "$Bytes bytes"
+}
+
+# ----------------------------------------------------------- locate manifest
+$manifestPath = $null
+$dir = $null
+
+if ($Manifest) {
+    if (-not (Test-Path -LiteralPath $Manifest -PathType Leaf)) {
+        throw "Manifest not found: $Manifest"
+    }
+    $manifestPath = (Get-Item -LiteralPath $Manifest -Force).FullName
+    $dir = Split-Path -Parent $manifestPath
+}
+elseif (Test-Path -LiteralPath $PartsDir -PathType Leaf) {
+    $manifestPath = (Get-Item -LiteralPath $PartsDir -Force).FullName
+    $dir = Split-Path -Parent $manifestPath
+}
+elseif (Test-Path -LiteralPath $PartsDir -PathType Container) {
+    $dir = (Get-Item -LiteralPath $PartsDir -Force).FullName
+    $found = @(Get-ChildItem -LiteralPath $dir -Filter '*.manifest.json' -File -Force)
+    if ($found.Count -eq 0) {
+        throw "No '*.manifest.json' found in $dir. Copy the manifest next to the parts."
+    }
+    if ($found.Count -gt 1) {
+        $names = ($found | ForEach-Object { '  ' + $_.Name }) -join [Environment]::NewLine
+        throw "More than one manifest in $dir - pick one with -Manifest:$([Environment]::NewLine)$names"
+    }
+    $manifestPath = $found[0].FullName
+}
+else {
+    throw "Parts folder not found: $PartsDir"
+}
+
+# ------------------------------------------------------------ read manifest
+$rawJson = [System.IO.File]::ReadAllText((ConvertTo-LongPath $manifestPath))
+$m = $rawJson | ConvertFrom-Json
+if ($null -eq $m) { throw "Manifest is empty or not valid JSON: $manifestPath" }
+if ($m.format -ne 'split-archive/1') {
+    throw "Unsupported manifest format '$($m.format)' in $manifestPath"
+}
+
+$parts = @($m.parts)
+if ($parts.Count -eq 0) { throw "Manifest lists no parts: $manifestPath" }
+
+# Name for the rebuilt file: manifest 'outputName' when present (rename-only),
+# otherwise the original source name. Only a bare file name is accepted.
+$outName = [string]$m.outputName
+if ([string]::IsNullOrWhiteSpace($outName) -or $outName -ne [System.IO.Path]::GetFileName($outName)) {
+    $outName = [string]$m.sourceName
+}
+if ([string]::IsNullOrWhiteSpace($outName)) { $outName = 'rebuilt.bin' }
+if ([int]$m.partCount -ne $parts.Count) {
+    throw "Manifest is inconsistent: partCount=$($m.partCount) but $($parts.Count) part entries."
+}
+
+$expectedBytes = [int64]$m.sourceBytes
+$expectedHash = ([string]$m.sourceSha256).ToLowerInvariant()
+$sumBytes = [int64]0
+$sorted = @($parts | Sort-Object { [int]$_.index })
+for ($i = 0; $i -lt $sorted.Count; $i++) {
+    if ([int]$sorted[$i].index -ne $i + 1) {
+        throw "Manifest part order is broken at index $($i + 1) ('$($sorted[$i].file)')."
+    }
+    $sumBytes += [int64]$sorted[$i].bytes
+}
+if ($sumBytes -ne $expectedBytes) {
+    throw "Manifest is inconsistent: parts add up to $sumBytes bytes, header says $expectedBytes."
+}
+
+Write-Host ''
+Write-Host "Manifest : $manifestPath"
+Write-Host "Source   : $($m.sourceName)"
+Write-Host "Output   : $outName"
+Write-Host ('Size     : {0:N0} bytes ({1})' -f $expectedBytes, (Format-Bytes $expectedBytes))
+Write-Host "Parts    : $($parts.Count) in $dir"
+Write-Host "SHA256   : $expectedHash"
+Write-Host ''
+
+# ------------------------------------------------------------- verify parts
+$problems = @()
+$i = 0
+foreach ($p in $sorted) {
+    $i++
+    $pPath = Join-Path $dir ([string]$p.file)
+    if (-not (Test-Path -LiteralPath $pPath -PathType Leaf)) {
+        $problems += "missing   : $($p.file)"
+        continue
+    }
+    $actualBytes = (Get-Item -LiteralPath $pPath -Force).Length
+    if ($actualBytes -ne [int64]$p.bytes) {
+        $problems += ("size      : {0} is {1:N0} bytes, expected {2:N0}" -f $p.file, $actualBytes, [int64]$p.bytes)
+        continue
+    }
+    $actualHash = Get-FileSha256 -FullPath $pPath
+    if ($actualHash -ne ([string]$p.sha256).ToLowerInvariant()) {
+        $problems += ("checksum  : {0} SHA-256 {1} - expected {2}" -f $p.file, $actualHash, ([string]$p.sha256).ToLowerInvariant())
+        continue
+    }
+    Write-Host ('  [ok {0}/{1}] {2}' -f $i, $sorted.Count, $p.file)
+    Write-Progress -Activity 'Verifying parts' -Status $p.file `
+        -PercentComplete ([int](($i / [double]$sorted.Count) * 100))
+}
+Write-Progress -Activity 'Verifying parts' -Completed
+
+if ($problems.Count -gt 0) {
+    Write-Host ''
+    Write-Host "Repair needed - $($problems.Count) problem(s):" -ForegroundColor Red
+    $problems | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+    Write-Host ''
+    Write-Host 'Re-send only the files listed above, then run this again.'
+    exit 2
+}
+
+if ($VerifyOnly) {
+    Write-Host ''
+    Write-Host 'All parts verified. Nothing was rebuilt (-VerifyOnly).'
+    exit 0
+}
+
+# --------------------------------------------------------------- output path
+if (-not $OutputPath) {
+    $OutputPath = Join-Path $dir $outName
+}
+$OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
+$outDir = Split-Path -Parent $OutputPath
+if (-not $outDir) { $outDir = $dir }
+if (-not (Test-Path -LiteralPath $outDir -PathType Container)) {
+    $null = New-Item -ItemType Directory -Path $outDir -Force
+}
+if ((Test-Path -LiteralPath $OutputPath) -and -not $Force) {
+    throw "Output already exists: $OutputPath. Re-run with -Force to overwrite."
+}
+
+# free-space check
+try {
+    $root = [System.IO.Path]::GetPathRoot($OutputPath)
+    $drive = New-Object System.IO.DriveInfo($root)
+    if ($drive.IsReady -and $drive.AvailableFreeSpace -lt ($expectedBytes + 16MB)) {
+        throw ("Not enough free space on {0}: {1} available, {2} needed." -f `
+                $root, (Format-Bytes $drive.AvailableFreeSpace), (Format-Bytes ($expectedBytes + 16MB)))
+    }
+}
+catch [System.ArgumentException] {
+    # unusual path root (e.g. UNC without credentials) - skip the check
+}
+finally {
+    if ($null -ne $drive) { $drive = $null }
+}
+
+# ------------------------------------------------------------- concatenate
+$tempPath = $OutputPath + '.joining.tmp'
+if (Test-Path -LiteralPath $tempPath) {
+    Remove-Item -LiteralPath $tempPath -Force
+}
+
+$out = $null
+try {
+    $out = [System.IO.File]::Open((ConvertTo-LongPath $tempPath),
+        [System.IO.FileMode]::Create,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None)
+    $buffer = New-Object byte[] $BufferSize
+    $i = 0
+    foreach ($p in $sorted) {
+        $i++
+        $pPath = Join-Path $dir ([string]$p.file)
+        $in = [System.IO.File]::Open((ConvertTo-LongPath $pPath),
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read)
+        try {
+            while ($true) {
+                $read = $in.Read($buffer, 0, $buffer.Length)
+                if ($read -le 0) { break }
+                $out.Write($buffer, 0, $read)
+            }
+        }
+        finally {
+            $in.Dispose()
+        }
+        Write-Host ('  [joined {0}/{1}] {2}' -f $i, $sorted.Count, $p.file)
+        Write-Progress -Activity 'Joining' -Status $p.file `
+            -PercentComplete ([int](($i / [double]$sorted.Count) * 100))
+    }
+    $out.Flush()
+}
+catch {
+    if ($null -ne $out) { $out.Dispose(); $out = $null }
+    if (Test-Path -LiteralPath $tempPath) { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue }
+    throw
+}
+finally {
+    if ($null -ne $out) { $out.Dispose() }
+    Write-Progress -Activity 'Joining' -Completed
+}
+
+Write-Host ''
+$tempBytes = (Get-Item -LiteralPath $tempPath -Force).Length
+$tempHash = Get-FileSha256 -FullPath $tempPath -Activity 'Verifying rebuilt file'
+
+if ($tempBytes -ne $expectedBytes -or $tempHash -ne $expectedHash) {
+    Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+    Write-Host 'Rebuilt file does NOT match the manifest - discarded.' -ForegroundColor Red
+    Write-Host ("  bytes : {0} (expected {1})" -f $tempBytes, $expectedBytes) -ForegroundColor Red
+    Write-Host ("  sha256: {0}" -f $tempHash) -ForegroundColor Red
+    Write-Host ("  expect: {0}" -f $expectedHash) -ForegroundColor Red
+    exit 3
+}
+
+# ------------------------------------------------------- promote to real name
+if (Test-Path -LiteralPath $OutputPath) {
+    Remove-Item -LiteralPath $OutputPath -Force
+}
+Move-Item -LiteralPath $tempPath -Destination $OutputPath -Force
+
+Write-Host 'Rebuilt and verified:' -ForegroundColor Green
+Write-Host "  $OutputPath"
+Write-Host ('  {0:N0} bytes' -f $tempBytes)
+Write-Host "  SHA256 $tempHash"
+Write-Host ''
+exit 0
